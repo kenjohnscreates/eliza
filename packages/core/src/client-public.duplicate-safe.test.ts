@@ -32,6 +32,7 @@ describe("@elizaos/core/client-public is duplicate-safe", () => {
 			"isTruthyEnvValue",
 			"resolveAliasedEnvValue",
 			"sanitizeForSettingsDebug",
+			"sanitizeSpeechText",
 			"settingsDebugCloudSummary",
 		]);
 	});
