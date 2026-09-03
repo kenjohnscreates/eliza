@@ -184,6 +184,66 @@ describe("startCloudAgentHandoff — dedicated migration target", () => {
     ).toBe(true);
   });
 
+  it("never switches onto a hosted shared bridge advertised by the control plane", async () => {
+    // The other direction of the never-switch-onto-shared invariant: the row
+    // passes every earlier guard (dedicated target, no tier field, running,
+    // bridge_url present so hasDedicatedUrl holds) but its bridge resolves to
+    // a hosted shared-adapter base with no loopback dedicated proxy behind it.
+    // The mock answers the whole switch path, so the base-shape guard is the
+    // only thing standing between this fixture and a switch onto the bridge.
+    const dedicatedId = "00000000-0000-4000-8000-00000000000b";
+    const detailUrl = `${DEFAULT_DIRECT_CLOUD_API_BASE_URL}/api/v1/eliza/agents/${dedicatedId}`;
+    const bridgeUrl = `${detailUrl}/bridge`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === detailUrl) {
+        return {
+          status: 200,
+          json: async () => ({
+            success: true,
+            data: {
+              id: dedicatedId,
+              status: "running",
+              bridgeUrl,
+              webUiUrl: null,
+            },
+          }),
+        };
+      }
+      if (url.endsWith("/api/health")) {
+        return { status: 200, json: async () => ({ ready: true }) };
+      }
+      if (url.endsWith("/messages")) {
+        return { status: 200, json: async () => ({ messages: [] }) };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { client } = fakeClient({});
+    const onSwitch = vi.fn();
+    const result = await client.startCloudAgentHandoff({
+      agentId: "shared-1",
+      sharedApiBase: SHARED_BASE,
+      conversationId: "shared-1",
+      dedicatedAgentId: dedicatedId,
+      cloudApiBase: "https://www.elizacloud.ai",
+      authToken: "tok",
+      onSwitch,
+      intervalMs: 1,
+      timeoutMs: 20,
+      log: () => {},
+    });
+
+    expect(result.status).toBe("timed-out");
+    expect(onSwitch).not.toHaveBeenCalled();
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/api/health"),
+      ),
+    ).toBe(false);
+  });
+
   it("uses the agent-scoped local Cloud proxy when no public agent URL exists", async () => {
     const dedicatedId = "00000000-0000-4000-8000-000000000001";
     const cloudApiBase = "http://127.0.0.1:8787";
