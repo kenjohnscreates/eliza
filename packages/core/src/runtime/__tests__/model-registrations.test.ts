@@ -56,6 +56,36 @@ describe("AgentRuntime model-registration observability", () => {
 		expect(payload).not.toHaveProperty("handler");
 	});
 
+	it("reports a rejecting subscriber instead of raising an unhandled rejection", async () => {
+		const runtime = makeRuntime();
+		const rejections: unknown[] = [];
+		const onRejection = (reason: unknown) => {
+			rejections.push(reason);
+		};
+		process.on("unhandledRejection", onRejection);
+		// registerEvent is a public extension point: a plugin's subscriber may
+		// reject, and the registration dispatch is fire-and-forget.
+		runtime.registerEvent(EventType.MODEL_REGISTERED, async () => {
+			throw new Error("subscriber mirror failed");
+		});
+		try {
+			runtime.registerModel(ModelType.TEXT_LARGE, noopHandler, "provider-a");
+
+			await new Promise((resolve) => setImmediate(resolve));
+			expect(rejections).toEqual([]);
+			expect(
+				runtime
+					.getRecentReportedErrors()
+					.filter((entry) => entry.scope === "ModelDispatcher.modelRegistered"),
+			).toHaveLength(1);
+			// The registration itself still stands: bookkeeping never blocks it.
+			expect(runtime.getModel(ModelType.TEXT_LARGE)).toBeDefined();
+		} finally {
+			process.off("unhandledRejection", onRejection);
+			await runtime.close();
+		}
+	});
+
 	it("defaults the emitted priority to 0 when none is supplied", async () => {
 		const runtime = makeRuntime();
 		const seen: ModelRegisteredEventPayload[] = [];

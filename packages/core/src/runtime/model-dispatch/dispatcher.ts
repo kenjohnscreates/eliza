@@ -199,14 +199,25 @@ export class RuntimeModelDispatch {
 		// routing table) can mirror the model registry without patching the
 		// runtime or capturing handlers. Fire-and-forget: a no-op when nothing
 		// is subscribed, and registry bookkeeping must never block boot.
-		void this.runtime.emitEvent(EventType.MODEL_REGISTERED, {
-			runtime: this.runtime,
-			source: "runtime",
-			modelType: modelKey,
-			metadata,
-			provider,
-			priority: priority || 0,
-		});
+		void this.runtime
+			.emitEvent(EventType.MODEL_REGISTERED, {
+				runtime: this.runtime,
+				source: "runtime",
+				modelType: modelKey,
+				metadata,
+				provider,
+				priority: priority || 0,
+			})
+			.catch((error) => {
+				// error-policy:J7 diagnostics-must-not-kill-the-loop — `emitEvent`
+				// awaits its handlers with a bare `Promise.all`, so any subscriber
+				// (including a plugin's) that rejects would otherwise surface here
+				// as an unhandled rejection on a fire-and-forget dispatch.
+				this.runtime.reportError("ModelDispatcher.modelRegistered", error, {
+					modelType: modelKey,
+					provider,
+				});
+			});
 	}
 
 	/**
