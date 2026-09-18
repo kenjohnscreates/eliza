@@ -62,7 +62,21 @@ export class EmbeddingGenerationService extends Service {
 		)
 			return;
 		this.isDisabled = false;
-		await this.initialize();
+		try {
+			await this.initialize();
+		} catch (error) {
+			// error-policy:J7 MODEL_REGISTERED is dispatched fire-and-forget
+			// (dispatcher's `void emitEvent`), so a throw here becomes an
+			// unhandled rejection. Report it and return to the waiting state so
+			// the next registration retries activation instead of inheriting a
+			// permanently rejected initialization.
+			this.isDisabled = true;
+			this.runtime.reportError(
+				"EmbeddingGenerationService.modelRegistration",
+				error,
+				{ modelType: payload.modelType },
+			);
+		}
 	};
 
 	private static readonly EMBEDDING_DRAIN_TASK = "EMBEDDING_DRAIN";
@@ -105,7 +119,13 @@ export class EmbeddingGenerationService extends Service {
 		if (this.stopped || this.isDisabled) return Promise.resolve();
 		// Model registration and incoming requests can overlap. They share one
 		// queue initialization, including any failure from task registration.
-		this.initialization ??= this.initializeQueue();
+		// A rejected initialization must not stay cached: clearing it lets a
+		// later model registration retry queue creation instead of replaying
+		// the same rejection forever.
+		this.initialization ??= this.initializeQueue().catch((error) => {
+			this.initialization = null;
+			throw error;
+		});
 		return this.initialization;
 	}
 
@@ -191,7 +211,14 @@ export class EmbeddingGenerationService extends Service {
 		payload: EmbeddingGenerationPayload,
 	): Promise<void> {
 		if (this.stopped) return;
-		await this.initialization;
+		try {
+			await this.initialization;
+		} catch {
+			// error-policy:J5 the same rejection is reported through
+			// `runtime.reportError` by the initialize() caller; a failed
+			// initialization leaves `batchQueue` null, so the guard below skips
+			// this request.
+		}
 		if (this.stopped) return;
 		if (this.isDisabled || !this.batchQueue) {
 			this.runtime.logger.debug(
@@ -498,7 +525,21 @@ export class EmbeddingGenerationService extends Service {
 			EventType.EMBEDDING_GENERATION_REQUESTED,
 			this.embeddingRequestHandler,
 		);
-		await this.initialization;
+		try {
+			await this.initialization;
+		} catch (error) {
+			// error-policy:J6 teardown-only: the rejection was already reported
+			// where initialize() was awaited, and a failed initialization left
+			// nothing to dispose.
+			this.runtime.logger.debug(
+				{
+					src: "plugin:basic-capabilities:service:embedding",
+					agentId: this.runtime.agentId,
+					error,
+				},
+				"Initialization had failed before stop; nothing to dispose",
+			);
+		}
 		this.runtime.logger.info(
 			{
 				src: "plugin:basic-capabilities:service:embedding",

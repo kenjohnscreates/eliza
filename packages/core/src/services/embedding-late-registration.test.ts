@@ -114,6 +114,79 @@ test.each([ModelType.TEXT_EMBEDDING, ModelType.TEXT_EMBEDDING_BATCH])(
 	},
 );
 
+test("a transient drain-task failure during late activation is reported and retried, not cached", async () => {
+	const runtime = new AgentRuntime({
+		character: createCharacter({ name: "Flaky task store activation" }),
+		adapter: new InMemoryDatabaseAdapter(),
+		logLevel: "fatal",
+		enableAutonomy: false,
+	});
+	const service = (await EmbeddingGenerationService.start(
+		runtime,
+	)) as EmbeddingGenerationService;
+	const rejections: unknown[] = [];
+	const onRejection = (reason: unknown) => {
+		rejections.push(reason);
+	};
+	process.on("unhandledRejection", onRejection);
+	// Fault injection at the task-store boundary: the first drain-task
+	// creation fails as a transient outage, every later call succeeds.
+	const originalCreateTask = runtime.createTask.bind(runtime);
+	let createTaskCalls = 0;
+	runtime.createTask = async (task) => {
+		if (createTaskCalls++ === 0) throw new Error("transient task-store outage");
+		return originalCreateTask(task);
+	};
+	const vector = Array.from({ length: 384 }, (_, i) => (i + 1) / 384);
+	const memory = {
+		id: "35c76f2f-15d0-4b74-9de1-1fb0a91c1976" as const,
+		entityId: runtime.agentId,
+		roomId: runtime.agentId,
+		content: { text: "Recovered after a task-store blip." },
+	};
+	try {
+		await runtime.createMemory(memory, "messages");
+		runtime.registerModel(ModelType.TEXT_EMBEDDING, async () => vector, "one");
+		await expect
+			.poll(() =>
+				runtime
+					.getRecentReportedErrors()
+					.filter(
+						(e) => e.scope === "EmbeddingGenerationService.modelRegistration",
+					),
+			)
+			.toHaveLength(1);
+		expect(await runtime.getTasksByName("EMBEDDING_DRAIN")).toHaveLength(0);
+		// The failed activation must return the service to the waiting state:
+		// the next registration retries queue creation and succeeds.
+		runtime.registerModel(ModelType.TEXT_EMBEDDING, async () => vector, "two");
+		await expect
+			.poll(
+				async () => (await runtime.getTasksByName("EMBEDDING_DRAIN")).length,
+			)
+			.toBe(1);
+		await runtime.emitEvent(EventType.EMBEDDING_GENERATION_REQUESTED, {
+			runtime,
+			memory,
+			priority: "high",
+		});
+		const tasks = await runtime.getTasksByName("EMBEDDING_DRAIN");
+		const worker = runtime.getTaskWorker("EMBEDDING_DRAIN");
+		if (!worker || !tasks[0]) throw new Error("Missing drain worker");
+		await worker.execute(runtime, {}, tasks[0]);
+		expect((await runtime.getMemoryById(memory.id))?.embedding).toEqual(vector);
+		await service.stop();
+		// The fire-and-forget MODEL_REGISTERED dispatch must never surface the
+		// activation failure as an unhandled rejection.
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(rejections).toEqual([]);
+	} finally {
+		process.off("unhandledRejection", onRejection);
+		await service.stop();
+		await runtime.close();
+	}
+});
+
 test("a stopped waiting service never activates when a provider arrives", async () => {
 	const runtime = new AgentRuntime({
 		character: createCharacter({ name: "Stopped embedding waiter" }),
